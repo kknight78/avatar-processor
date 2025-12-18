@@ -24,9 +24,9 @@ OUTPUT_HEIGHT = 960
 BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
 # Fixed positioning constants (in pixels for 720x960 frame)
-HEAD_TOP_Y = 60              # Top of head at exactly 60px from frame top
-TARGET_HEAD_HEIGHT = 160     # Target head height in pixels
-MIN_SIDE_MARGIN = 0.10       # Minimum 10% margin on sides (narrower frame)
+HEAD_TOP_Y = 120             # Top of head at 120px from frame top
+TARGET_HEAD_HEIGHT = 240     # Target head height in pixels (larger scale)
+MIN_SIDE_MARGIN = 0.05       # Minimum 5% margin on sides
 
 # Cloudinary config (optional - for hosted output)
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
@@ -144,7 +144,7 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': '5-portrait-4x3',
+        'version': '6-larger-scale',
         'output_size': f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
         'head_top_y': HEAD_TOP_Y,
         'target_head_height': TARGET_HEAD_HEIGHT
