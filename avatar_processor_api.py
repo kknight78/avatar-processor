@@ -18,15 +18,15 @@ import numpy as np
 
 app = Flask(__name__)
 
-# Output dimensions - 16:9 landscape for HeyGen talking head
-OUTPUT_WIDTH = 1280
-OUTPUT_HEIGHT = 720
+# Output dimensions - 3:4 portrait (standard phone camera aspect ratio)
+OUTPUT_WIDTH = 720
+OUTPUT_HEIGHT = 960
 BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
-# Fixed positioning constants (in pixels for 1280x720 frame)
+# Fixed positioning constants (in pixels for 720x960 frame)
 HEAD_TOP_Y = 60              # Top of head at exactly 60px from frame top
 TARGET_HEAD_HEIGHT = 160     # Target head height in pixels
-MIN_SIDE_MARGIN = 0.15       # Minimum 15% margin on sides
+MIN_SIDE_MARGIN = 0.10       # Minimum 10% margin on sides (narrower frame)
 
 # Cloudinary config (optional - for hosted output)
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
@@ -144,7 +144,7 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': '4-original-landscape',
+        'version': '5-portrait-4x3',
         'output_size': f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
         'head_top_y': HEAD_TOP_Y,
         'target_head_height': TARGET_HEAD_HEIGHT
