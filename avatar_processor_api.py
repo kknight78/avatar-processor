@@ -18,17 +18,15 @@ import numpy as np
 
 app = Flask(__name__)
 
-# Output dimensions - 9:16 portrait for HeyGen talking photo videos
-OUTPUT_WIDTH = 720
-OUTPUT_HEIGHT = 1280
+# Output dimensions - 16:9 landscape for HeyGen talking head
+OUTPUT_WIDTH = 1280
+OUTPUT_HEIGHT = 720
 BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
-# Fixed positioning constants for portrait format
-# Body anchored to BOTTOM of frame, cut off at mid-thigh
-BODY_BOTTOM_Y = 1280         # Body touches bottom of frame
-TARGET_HEAD_HEIGHT = 200     # Target head height in pixels
-MIN_SIDE_MARGIN = 0.10       # Minimum 10% margin on sides (narrower frame needs less margin)
-HEAD_TOP_MARGIN = 80         # Minimum space from top of frame to top of head
+# Fixed positioning constants (in pixels for 1280x720 frame)
+HEAD_TOP_Y = 60              # Top of head at exactly 60px from frame top
+TARGET_HEAD_HEIGHT = 160     # Target head height in pixels
+MIN_SIDE_MARGIN = 0.15       # Minimum 15% margin on sides
 
 # Cloudinary config (optional - for hosted output)
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
@@ -104,29 +102,14 @@ def process_avatar_image(img_rgba, face_data=None):
         max_width = OUTPUT_WIDTH * (1 - 2 * MIN_SIDE_MARGIN)
         scale = max_width / person_width
 
-    # Safety check: ensure head doesn't go above minimum top margin
-    scaled_head_top_from_person_top = (head_top - p_top) * scale
-    scaled_person_height = person_height * scale
-    # If body bottom at frame bottom, where would head top be?
-    potential_head_top = OUTPUT_HEIGHT - scaled_person_height + scaled_head_top_from_person_top
-    if potential_head_top < HEAD_TOP_MARGIN:
-        # Need to scale down so head fits
-        # head_top position = OUTPUT_HEIGHT - (person_height * scale) + ((head_top - p_top) * scale)
-        # We want this >= HEAD_TOP_MARGIN
-        # OUTPUT_HEIGHT - person_height * scale + (head_top - p_top) * scale >= HEAD_TOP_MARGIN
-        # OUTPUT_HEIGHT - scale * (person_height - head_top + p_top) >= HEAD_TOP_MARGIN
-        # OUTPUT_HEIGHT - scale * (p_bottom - head_top) >= HEAD_TOP_MARGIN
-        # scale <= (OUTPUT_HEIGHT - HEAD_TOP_MARGIN) / (p_bottom - head_top)
-        scale = (OUTPUT_HEIGHT - HEAD_TOP_MARGIN) / (p_bottom - head_top)
-
     # Resize the entire image
     new_width = int(img_rgba.width * scale)
     new_height = int(img_rgba.height * scale)
     img_scaled = img_rgba.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-    # Calculate position to place BODY BOTTOM at frame bottom
-    scaled_p_bottom = p_bottom * scale
-    y_offset = int(OUTPUT_HEIGHT - scaled_p_bottom)
+    # Calculate position to place HEAD TOP at FIXED Y position
+    scaled_head_top = head_top * scale
+    y_offset = int(HEAD_TOP_Y - scaled_head_top)
 
     # Center horizontally based on person center
     scaled_p_left = p_left * scale
@@ -161,9 +144,9 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': '3-bottom-anchor',
+        'version': '4-original-landscape',
         'output_size': f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
-        'head_top_margin': HEAD_TOP_MARGIN,
+        'head_top_y': HEAD_TOP_Y,
         'target_head_height': TARGET_HEAD_HEIGHT
     })
 
