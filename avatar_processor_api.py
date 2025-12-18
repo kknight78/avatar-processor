@@ -3,20 +3,25 @@
 Avatar Photo Processor API
 Flask API that processes avatar photos for HeyGen:
 1. Downloads background-removed image
-2. Scales based on head height
-3. Positions head at fixed location
-4. Returns processed image URL (via Cloudinary or base64)
+2. Detects face via Replicate to find chin position
+3. Scales based on head height (top of head to chin)
+4. Positions head at fixed location
+5. Returns processed image URL (via Cloudinary or base64)
 """
 
 import os
 import requests
 import base64
+import time
 from io import BytesIO
 from flask import Flask, request, jsonify
 from PIL import Image
 import numpy as np
 
 app = Flask(__name__)
+
+# Replicate API token for face detection
+REPLICATE_TOKEN = os.environ.get('REPLICATE_TOKEN', '')
 
 # Output dimensions - 9:16 portrait (TikTok/Reels standard)
 OUTPUT_WIDTH = 720
@@ -32,6 +37,87 @@ MIN_SIDE_MARGIN = 0.05       # Minimum 5% margin on sides
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
 CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '')
 CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', '')
+
+
+def detect_face_from_image(img_rgba):
+    """
+    Detect face using Replicate face-detection model
+    Returns face bbox dict with 'y' and 'height' for chin position
+    """
+    if not REPLICATE_TOKEN:
+        print("No REPLICATE_TOKEN, skipping face detection")
+        return None
+
+    # Convert image to base64 for Replicate
+    buffered = BytesIO()
+    # Convert RGBA to RGB for face detection
+    img_rgb = Image.new('RGB', img_rgba.size, (255, 255, 255))
+    img_rgb.paste(img_rgba, mask=img_rgba.split()[3] if img_rgba.mode == 'RGBA' else None)
+    img_rgb.save(buffered, format='PNG')
+    image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
+    data_uri = f"data:image/png;base64,{image_data}"
+
+    try:
+        # Using marckohlbrugge/face-detect model
+        response = requests.post(
+            "https://api.replicate.com/v1/predictions",
+            headers={
+                "Authorization": f"Bearer {REPLICATE_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "version": "8932afc017cd4f63d97693ce6f82de5daff86b54b6deae5629726510ca7ce191",
+                "input": {"image": data_uri}
+            },
+            timeout=30
+        )
+
+        prediction = response.json()
+        if 'id' not in prediction:
+            print(f"Face detection failed to start: {prediction}")
+            return None
+
+        get_url = prediction['urls']['get']
+
+        # Poll for result (max 30 seconds)
+        for _ in range(30):
+            result = requests.get(
+                get_url,
+                headers={"Authorization": f"Bearer {REPLICATE_TOKEN}"},
+                timeout=10
+            ).json()
+
+            if result['status'] == 'succeeded':
+                output = result.get('output')
+                print(f"Face detection raw output: {output}")
+
+                if output:
+                    # Handle different output formats from the model
+                    if isinstance(output, dict) and 'faces' in output and len(output['faces']) > 0:
+                        face = output['faces'][0]
+                        return {'y': face['y'], 'height': face['height']}
+                    elif isinstance(output, list) and len(output) > 0:
+                        face = output[0]
+                        if 'y' in face and 'height' in face:
+                            return {'y': face['y'], 'height': face['height']}
+                    elif isinstance(output, dict) and 'y' in output:
+                        return {'y': output['y'], 'height': output['height']}
+
+                print("No face found in output")
+                return None
+
+            elif result['status'] == 'failed':
+                print(f"Face detection failed: {result.get('error')}")
+                return None
+
+            time.sleep(1)
+
+        print("Face detection timed out")
+        return None
+
+    except Exception as e:
+        print(f"Face detection error: {e}")
+        return None
 
 
 def find_person_bounds(img):
@@ -63,7 +149,7 @@ def process_avatar_image(img_rgba, face_data=None):
 
     Args:
         img_rgba: PIL Image with transparency (RGBA)
-        face_data: dict with face detection results {'x', 'y', 'width', 'height'}
+        face_data: dict with face detection results {'y', 'height'}
 
     Returns:
         PIL Image (RGB) with gray background
@@ -73,13 +159,22 @@ def process_avatar_image(img_rgba, face_data=None):
     person_width = p_right - p_left
     person_height = p_bottom - p_top
 
-    # Calculate head position
+    # If no face_data provided, detect face automatically
+    if not face_data or 'y' not in face_data:
+        print("No face_data provided, running face detection...")
+        face_data = detect_face_from_image(img_rgba)
+
+    # Calculate head position from face detection
+    face_detected = False
     if face_data and 'y' in face_data and 'height' in face_data:
         face_top = face_data['y']
         face_height = face_data['height']
         face_bottom = face_top + face_height
+        face_detected = True
+        print(f"Using detected face: y={face_top}, height={face_height}, chin at {face_bottom}")
     else:
-        # Estimate face position
+        # Fallback: estimate face position (only if face detection fails)
+        print("Face detection failed, falling back to estimation")
         face_top = p_top + int(person_height * 0.05)
         face_height = int(person_height * 0.15)
         face_bottom = face_top + face_height
@@ -92,6 +187,7 @@ def process_avatar_image(img_rgba, face_data=None):
 
     if head_height <= 0:
         head_height = int(person_height * 0.2)
+        face_detected = False
 
     # Calculate scale based on HEAD HEIGHT
     scale = TARGET_HEAD_HEIGHT / head_height
@@ -129,6 +225,7 @@ def process_avatar_image(img_rgba, face_data=None):
         'scale': scale,
         'head_height_original': head_height,
         'head_height_final': TARGET_HEAD_HEIGHT,
+        'face_detected': face_detected,
         'x_offset': x_offset,
         'y_offset': y_offset,
         'person_bounds': {
@@ -144,10 +241,11 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': '13-head-lower',
+        'version': '14-face-detection',
         'output_size': f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
         'head_top_y': HEAD_TOP_Y,
-        'target_head_height': TARGET_HEAD_HEIGHT
+        'target_head_height': TARGET_HEAD_HEIGHT,
+        'face_detection': 'enabled' if REPLICATE_TOKEN else 'disabled'
     })
 
 
