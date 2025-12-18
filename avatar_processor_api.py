@@ -256,7 +256,8 @@ def process():
 
     Request JSON:
         - image_url: URL of background-removed image (PNG with transparency)
-        - face_data: (optional) Face detection result {'x', 'y', 'width', 'height'}
+        - original_image_url: (optional) URL of original image for face detection
+        - face_data: (optional) Face detection result {'y', 'height'}
         - output_format: 'base64' or 'url' (default: 'base64')
 
     Response JSON:
@@ -271,16 +272,32 @@ def process():
             return jsonify({'success': False, 'error': 'Missing image_url'}), 400
 
         image_url = data['image_url']
+        original_image_url = data.get('original_image_url')
         face_data = data.get('face_data')
         output_format = data.get('output_format', 'base64')
 
-        # Download the image
+        # Download the bg-removed image
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
             return jsonify({'success': False, 'error': f'Failed to download image: {response.status_code}'}), 400
 
         # Open as RGBA
         img = Image.open(BytesIO(response.content)).convert('RGBA')
+
+        # If original_image_url provided and no face_data, detect face from original
+        if original_image_url and not face_data:
+            print(f"Detecting face from original image: {original_image_url}")
+            try:
+                orig_response = requests.get(original_image_url, timeout=30)
+                if orig_response.status_code == 200:
+                    orig_img = Image.open(BytesIO(orig_response.content)).convert('RGBA')
+                    face_data = detect_face_from_image(orig_img)
+                    if face_data:
+                        print(f"Face detected from original: {face_data}")
+                    else:
+                        print("No face detected from original, will try bg-removed image")
+            except Exception as e:
+                print(f"Error downloading original image: {e}")
 
         # Process the image
         processed_img, processing_info = process_avatar_image(img, face_data)
