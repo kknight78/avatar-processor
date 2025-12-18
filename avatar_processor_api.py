@@ -29,7 +29,7 @@ OUTPUT_HEIGHT = 1280
 BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
 # Fixed positioning constants (in pixels for 720x1280 frame)
-HEAD_TOP_Y = 380             # Top of head at 380px from frame top
+HEAD_TOP_Y = 480             # Top of head at 480px from frame top
 TARGET_HEAD_HEIGHT = 180     # Target head height in pixels (smaller for more arm room)
 MIN_SIDE_MARGIN = 0.05       # Minimum 5% margin on sides
 
