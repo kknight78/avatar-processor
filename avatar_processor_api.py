@@ -159,7 +159,13 @@ def process_avatar_image(img_rgba, face_data=None):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'version': '3-bottom-anchor',
+        'output_size': f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
+        'head_top_margin': HEAD_TOP_MARGIN,
+        'target_head_height': TARGET_HEAD_HEIGHT
+    })
 
 
 @app.route('/process', methods=['POST'])
