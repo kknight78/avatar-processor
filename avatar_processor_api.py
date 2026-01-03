@@ -346,7 +346,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v16.2-hybrid',
+        'version': 'v16.3-hybrid',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -372,7 +372,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v16.2-hybrid',
+        'version': 'v16.3-hybrid',
         'approach': 'Output size driven by face quality',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
@@ -402,13 +402,20 @@ def test_face_detect():
             return jsonify({'error': f'Failed to download: {response.status_code}'}), 400
 
         img = Image.open(BytesIO(response.content)).convert('RGBA')
+        original_size = f'{img.width}x{img.height}'
+
+        # Check if resize will happen
+        MAX_DIM = 1000
+        will_resize = img.width > MAX_DIM or img.height > MAX_DIM
 
         # Run face detection
         face_data = detect_face_from_image(img)
 
         return jsonify({
             'success': True,
-            'image_size': f'{img.width}x{img.height}',
+            'image_size': original_size,
+            'will_resize': will_resize,
+            'max_dimension': MAX_DIM,
             'face_data': face_data,
             'replicate_token_present': bool(REPLICATE_TOKEN),
             'replicate_token_length': len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0
