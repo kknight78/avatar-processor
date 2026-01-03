@@ -5,8 +5,11 @@ Flask API that processes avatar photos for HeyGen:
 1. Downloads background-removed image
 2. Detects face via Replicate to find chin position
 3. Scales based on head height (top of head to chin)
-4. Positions head at fixed location
-5. Returns processed image URL (via Cloudinary or base64)
+4. Positions head at fixed ratio from top
+5. Output size derived from face quality (not fixed resolution)
+6. Returns processed image URL (via Cloudinary or base64)
+
+v15: Ratio-based sizing - preserves face quality, output size driven by input face resolution
 """
 
 import os
@@ -23,15 +26,19 @@ app = Flask(__name__)
 # Replicate API token for face detection
 REPLICATE_TOKEN = os.environ.get('REPLICATE_TOKEN', '')
 
-# Output dimensions - 9:16 portrait (TikTok/Reels standard)
-OUTPUT_WIDTH = 720
-OUTPUT_HEIGHT = 1280
-BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
+# === RATIO-BASED CONSTANTS (no more fixed pixels!) ===
+# These ratios work at ANY resolution
 
-# Fixed positioning constants (in pixels for 720x1280 frame)
-HEAD_TOP_Y = 480             # Top of head at 480px from frame top
-TARGET_HEAD_HEIGHT = 180     # Target head height in pixels (smaller for more arm room)
-MIN_SIDE_MARGIN = 0.05       # Minimum 5% margin on sides
+HEAD_TOP_RATIO = 0.375      # Head top positioned at 37.5% from frame top
+HEAD_HEIGHT_RATIO = 0.14    # Head (top to chin) should be 14% of frame height
+MIN_SIDE_MARGIN_RATIO = 0.05  # Minimum 5% margin on sides
+
+# Output constraints
+TARGET_ASPECT_RATIO = 9 / 16  # Portrait 9:16
+MAX_OUTPUT_HEIGHT = 3840      # Cap at 4K to avoid crazy file sizes
+MIN_OUTPUT_HEIGHT = 1280      # Minimum for reasonable quality
+
+BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
 # Cloudinary config (optional - for hosted output)
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
@@ -143,21 +150,52 @@ def find_person_bounds(img):
     return left, top, right, bottom
 
 
+def calculate_output_dimensions(head_height_pixels):
+    """
+    Calculate output dimensions based on face quality.
+
+    The head height in the INPUT determines the output size.
+    This preserves face quality - bigger face = bigger output.
+
+    Args:
+        head_height_pixels: Height of head (top to chin) in input image pixels
+
+    Returns:
+        (output_width, output_height) tuple
+    """
+    # Head should be HEAD_HEIGHT_RATIO (14%) of output height
+    # So: output_height = head_height_pixels / HEAD_HEIGHT_RATIO
+    output_height = int(head_height_pixels / HEAD_HEIGHT_RATIO)
+
+    # Clamp to reasonable bounds
+    output_height = max(MIN_OUTPUT_HEIGHT, min(MAX_OUTPUT_HEIGHT, output_height))
+
+    # Width from 9:16 aspect ratio
+    output_width = int(output_height * TARGET_ASPECT_RATIO)
+
+    return output_width, output_height
+
+
 def process_avatar_image(img_rgba, face_data=None):
     """
-    Process avatar image: scale and position based on head size
+    Process avatar image: scale and position based on head size.
+    Output size is determined by face quality (not fixed resolution).
 
     Args:
         img_rgba: PIL Image with transparency (RGBA)
         face_data: dict with face detection results {'y', 'height'}
 
     Returns:
-        PIL Image (RGB) with gray background
+        PIL Image (RGB) with gray background, processing_info dict
     """
     # Find person bounds
     p_left, p_top, p_right, p_bottom = find_person_bounds(img_rgba)
     person_width = p_right - p_left
     person_height = p_bottom - p_top
+
+    print(f"Input image: {img_rgba.width}x{img_rgba.height}")
+    print(f"Person bounds: left={p_left}, top={p_top}, right={p_right}, bottom={p_bottom}")
+    print(f"Person size: {person_width}x{person_height}")
 
     # If no face_data provided, detect face automatically
     if not face_data or 'y' not in face_data:
@@ -189,43 +227,71 @@ def process_avatar_image(img_rgba, face_data=None):
         head_height = int(person_height * 0.2)
         face_detected = False
 
-    # Calculate scale based on HEAD HEIGHT
-    scale = TARGET_HEAD_HEIGHT / head_height
+    print(f"Head height (top to chin): {head_height}px")
+
+    # === KEY CHANGE: Output size based on face quality ===
+    output_width, output_height = calculate_output_dimensions(head_height)
+    print(f"Output dimensions (based on face quality): {output_width}x{output_height}")
+
+    # Calculate target values in pixels for this output size
+    target_head_top_y = int(output_height * HEAD_TOP_RATIO)
+    target_head_height = int(output_height * HEAD_HEIGHT_RATIO)
+
+    print(f"Target head position: top at y={target_head_top_y} ({HEAD_TOP_RATIO*100}%)")
+    print(f"Target head height: {target_head_height}px ({HEAD_HEIGHT_RATIO*100}%)")
+
+    # Calculate scale to achieve target head height
+    scale = target_head_height / head_height
+    print(f"Scale factor: {scale:.4f}")
 
     # Safety check: ensure minimum side margins
     scaled_person_width = person_width * scale
-    if scaled_person_width > OUTPUT_WIDTH * (1 - 2 * MIN_SIDE_MARGIN):
-        max_width = OUTPUT_WIDTH * (1 - 2 * MIN_SIDE_MARGIN)
-        scale = max_width / person_width
+    max_allowed_width = output_width * (1 - 2 * MIN_SIDE_MARGIN_RATIO)
+    if scaled_person_width > max_allowed_width:
+        old_scale = scale
+        scale = max_allowed_width / person_width
+        print(f"Adjusted scale for side margins: {old_scale:.4f} -> {scale:.4f}")
 
     # Resize the entire image
     new_width = int(img_rgba.width * scale)
     new_height = int(img_rgba.height * scale)
     img_scaled = img_rgba.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    print(f"Scaled image: {new_width}x{new_height}")
 
-    # Calculate position to place HEAD TOP at FIXED Y position
+    # Calculate position to place HEAD TOP at target Y position
     scaled_head_top = head_top * scale
-    y_offset = int(HEAD_TOP_Y - scaled_head_top)
+    y_offset = int(target_head_top_y - scaled_head_top)
 
     # Center horizontally based on person center
     scaled_p_left = p_left * scale
     scaled_p_right = p_right * scale
     scaled_person_center_x = (scaled_p_left + scaled_p_right) / 2
-    x_offset = int(OUTPUT_WIDTH / 2 - scaled_person_center_x)
+    x_offset = int(output_width / 2 - scaled_person_center_x)
+
+    print(f"Positioning: x_offset={x_offset}, y_offset={y_offset}")
 
     # Create output canvas and paste
-    output = Image.new('RGBA', (OUTPUT_WIDTH, OUTPUT_HEIGHT), (*BACKGROUND_COLOR, 255))
+    output = Image.new('RGBA', (output_width, output_height), (*BACKGROUND_COLOR, 255))
     output.paste(img_scaled, (x_offset, y_offset), img_scaled)
 
     # Convert to RGB (remove alpha)
-    output_rgb = Image.new('RGB', (OUTPUT_WIDTH, OUTPUT_HEIGHT), BACKGROUND_COLOR)
+    output_rgb = Image.new('RGB', (output_width, output_height), BACKGROUND_COLOR)
     output_rgb.paste(output, (0, 0), output)
 
+    # Check if legs were cropped
+    scaled_person_bottom = p_bottom * scale + y_offset
+    legs_cropped = scaled_person_bottom > output_height
+
     return output_rgb, {
-        'scale': scale,
-        'head_height_original': head_height,
-        'head_height_final': TARGET_HEAD_HEIGHT,
+        'version': 'v15-ratio-based',
+        'input_size': f'{img_rgba.width}x{img_rgba.height}',
+        'output_size': f'{output_width}x{output_height}',
+        'scale': round(scale, 4),
+        'head_height_input': head_height,
+        'head_height_output': int(head_height * scale),
+        'target_head_height': target_head_height,
         'face_detected': face_detected,
+        'legs_cropped': legs_cropped,
         'x_offset': x_offset,
         'y_offset': y_offset,
         'person_bounds': {
@@ -241,10 +307,12 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': '14-face-detection',
-        'output_size': f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
-        'head_top_y': HEAD_TOP_Y,
-        'target_head_height': TARGET_HEAD_HEIGHT,
+        'version': 'v15-ratio-based',
+        'approach': 'Output size driven by face quality',
+        'head_top_ratio': HEAD_TOP_RATIO,
+        'head_height_ratio': HEAD_HEIGHT_RATIO,
+        'max_output_height': MAX_OUTPUT_HEIGHT,
+        'min_output_height': MIN_OUTPUT_HEIGHT,
         'face_detection': 'enabled' if REPLICATE_TOKEN else 'disabled'
     })
 
@@ -264,6 +332,7 @@ def process():
         - success: boolean
         - processed_image: base64 string or URL
         - processing_info: dict with scale/position details
+        - dimensions: {width, height} of output
     """
     try:
         data = request.get_json()
@@ -276,6 +345,13 @@ def process():
         face_data = data.get('face_data')
         output_format = data.get('output_format', 'base64')
 
+        print(f"\n{'='*60}")
+        print(f"Processing avatar image")
+        print(f"Image URL: {image_url[:100]}...")
+        if original_image_url:
+            print(f"Original URL: {original_image_url[:100]}...")
+        print(f"{'='*60}")
+
         # Download the bg-removed image
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
@@ -283,14 +359,16 @@ def process():
 
         # Open as RGBA
         img = Image.open(BytesIO(response.content)).convert('RGBA')
+        print(f"Downloaded image: {img.width}x{img.height}")
 
         # If original_image_url provided and no face_data, detect face from original
         if original_image_url and not face_data:
-            print(f"Detecting face from original image: {original_image_url}")
+            print(f"Detecting face from original image...")
             try:
                 orig_response = requests.get(original_image_url, timeout=30)
                 if orig_response.status_code == 200:
                     orig_img = Image.open(BytesIO(orig_response.content)).convert('RGBA')
+                    print(f"Original image: {orig_img.width}x{orig_img.height}")
                     face_data = detect_face_from_image(orig_img)
                     if face_data:
                         print(f"Face detected from original: {face_data}")
@@ -302,10 +380,16 @@ def process():
         # Process the image
         processed_img, processing_info = process_avatar_image(img, face_data)
 
+        print(f"\nProcessing complete!")
+        print(f"Output: {processing_info['output_size']}")
+        print(f"Scale: {processing_info['scale']}")
+        print(f"Face detected: {processing_info['face_detected']}")
+        print(f"Legs cropped: {processing_info['legs_cropped']}")
+
         # Output
         if output_format == 'base64':
             buffered = BytesIO()
-            processed_img.save(buffered, format='PNG')
+            processed_img.save(buffered, format='PNG', optimize=False)
             img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
             return jsonify({
@@ -313,8 +397,8 @@ def process():
                 'processed_image': f'data:image/png;base64,{img_base64}',
                 'processing_info': processing_info,
                 'dimensions': {
-                    'width': OUTPUT_WIDTH,
-                    'height': OUTPUT_HEIGHT
+                    'width': processed_img.width,
+                    'height': processed_img.height
                 }
             })
         else:
@@ -322,9 +406,16 @@ def process():
             return jsonify({'success': False, 'error': 'URL output not yet implemented'}), 501
 
     except Exception as e:
+        import traceback
+        print(f"Error processing avatar: {e}")
+        print(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
+    print(f"Starting Avatar Processor API v15 (ratio-based) on port {port}")
+    print(f"Head top ratio: {HEAD_TOP_RATIO} ({HEAD_TOP_RATIO*100}%)")
+    print(f"Head height ratio: {HEAD_HEIGHT_RATIO} ({HEAD_HEIGHT_RATIO*100}%)")
+    print(f"Output height range: {MIN_OUTPUT_HEIGHT} - {MAX_OUTPUT_HEIGHT}")
     app.run(host='0.0.0.0', port=port, debug=True)
