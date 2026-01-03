@@ -38,8 +38,8 @@ def get_face_detector():
 # === RATIO-BASED CONSTANTS (no more fixed pixels!) ===
 # These ratios work at ANY resolution
 
-HEAD_TOP_RATIO = 0.375      # Head top positioned at 37.5% from frame top
-HEAD_HEIGHT_RATIO = 0.14    # Head (top to chin) should be 14% of frame height
+HEAD_TOP_RATIO = 0.38       # Head top positioned at 38% from frame top
+HEAD_HEIGHT_RATIO = 0.17    # Head (top to chin) should be 17% of frame height
 MIN_SIDE_MARGIN_RATIO = 0.05  # Minimum 5% margin on sides
 
 # Output constraints
