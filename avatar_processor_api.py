@@ -195,31 +195,44 @@ def calculate_output_dimensions(head_height_pixels):
     return output_width, output_height
 
 
-def process_avatar_image(img_rgba, face_data=None):
+def process_avatar_image(img_rgba, face_data=None, original_img=None):
     """
     Process avatar image: scale and position based on head size.
     Output size is determined by face quality (not fixed resolution).
 
     Args:
-        img_rgba: PIL Image with transparency (RGBA)
+        img_rgba: PIL Image with transparency (RGBA) - used for bounds detection
         face_data: dict with face detection results {'y', 'height'}
+        original_img: PIL Image - original photo with background (optional)
+                      If provided, output uses original with its background intact.
+                      If not provided, output uses bg-removed image with gray background.
 
     Returns:
-        PIL Image (RGB) with gray background, processing_info dict
+        PIL Image (RGB), processing_info dict
     """
-    # Find person bounds
+    # Determine which image to use for output
+    use_original = original_img is not None
+    output_source_img = original_img if use_original else img_rgba
+
+    print(f"[PROCESS] Mode: {'HYBRID (original + bg-removed for bounds)' if use_original else 'BG-REMOVED only'}")
+
+    # Find person bounds from bg-removed image (accurate head top detection)
     p_left, p_top, p_right, p_bottom = find_person_bounds(img_rgba)
     person_width = p_right - p_left
     person_height = p_bottom - p_top
 
     print(f"Input image: {img_rgba.width}x{img_rgba.height}")
-    print(f"Person bounds: left={p_left}, top={p_top}, right={p_right}, bottom={p_bottom}")
+    if use_original:
+        print(f"Original image: {original_img.width}x{original_img.height}")
+    print(f"Person bounds (from transparency): left={p_left}, top={p_top}, right={p_right}, bottom={p_bottom}")
     print(f"Person size: {person_width}x{person_height}")
 
     # If no face_data provided, detect face automatically
     if not face_data or 'y' not in face_data:
         print("No face_data provided, running face detection...")
-        face_data = detect_face_from_image(img_rgba)
+        # Detect from original if available (better quality), else from bg-removed
+        detect_source = original_img if use_original else img_rgba
+        face_data = detect_face_from_image(detect_source)
 
     # Calculate head position from face detection
     face_detected = False
@@ -236,7 +249,7 @@ def process_avatar_image(img_rgba, face_data=None):
         face_height = int(person_height * 0.15)
         face_bottom = face_top + face_height
 
-    # HEAD TOP = top of person bounding box (captures hat/hair)
+    # HEAD TOP = top of person bounding box (captures hat/hair) - from transparency
     head_top = p_top
 
     # HEAD HEIGHT = from top of head to bottom of face (chin)
@@ -248,7 +261,7 @@ def process_avatar_image(img_rgba, face_data=None):
 
     print(f"Head height (top to chin): {head_height}px")
 
-    # === KEY CHANGE: Output size based on face quality ===
+    # === Output size based on face quality ===
     output_width, output_height = calculate_output_dimensions(head_height)
     print(f"Output dimensions (based on face quality): {output_width}x{output_height}")
 
@@ -271,17 +284,17 @@ def process_avatar_image(img_rgba, face_data=None):
         scale = max_allowed_width / person_width
         print(f"Adjusted scale for side margins: {old_scale:.4f} -> {scale:.4f}")
 
-    # Resize the entire image
-    new_width = int(img_rgba.width * scale)
-    new_height = int(img_rgba.height * scale)
-    img_scaled = img_rgba.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    # Resize the source image (original or bg-removed)
+    new_width = int(output_source_img.width * scale)
+    new_height = int(output_source_img.height * scale)
+    img_scaled = output_source_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
     print(f"Scaled image: {new_width}x{new_height}")
 
     # Calculate position to place HEAD TOP at target Y position
     scaled_head_top = head_top * scale
     y_offset = int(target_head_top_y - scaled_head_top)
 
-    # Center horizontally based on person center
+    # Center horizontally based on person center (from transparency bounds)
     scaled_p_left = p_left * scale
     scaled_p_right = p_right * scale
     scaled_person_center_x = (scaled_p_left + scaled_p_right) / 2
@@ -289,21 +302,37 @@ def process_avatar_image(img_rgba, face_data=None):
 
     print(f"Positioning: x_offset={x_offset}, y_offset={y_offset}")
 
-    # Create output canvas and paste
-    output = Image.new('RGBA', (output_width, output_height), (*BACKGROUND_COLOR, 255))
-    output.paste(img_scaled, (x_offset, y_offset), img_scaled)
-
-    # Convert to RGB (remove alpha)
-    output_rgb = Image.new('RGB', (output_width, output_height), BACKGROUND_COLOR)
-    output_rgb.paste(output, (0, 0), output)
+    # Create output canvas
+    if use_original:
+        # HYBRID MODE: Gray background only at edges, original photo with its background
+        output_rgb = Image.new('RGB', (output_width, output_height), BACKGROUND_COLOR)
+        # Convert original to RGB if needed
+        if img_scaled.mode == 'RGBA':
+            img_scaled_rgb = Image.new('RGB', img_scaled.size, BACKGROUND_COLOR)
+            img_scaled_rgb.paste(img_scaled, (0, 0), img_scaled)
+            img_scaled = img_scaled_rgb
+        elif img_scaled.mode != 'RGB':
+            img_scaled = img_scaled.convert('RGB')
+        # Paste original photo (with its background) onto gray canvas
+        output_rgb.paste(img_scaled, (x_offset, y_offset))
+        print("[PROCESS] Output: Original photo with background, gray padding at edges")
+    else:
+        # LEGACY MODE: Full gray background with transparent person
+        output = Image.new('RGBA', (output_width, output_height), (*BACKGROUND_COLOR, 255))
+        output.paste(img_scaled, (x_offset, y_offset), img_scaled)
+        output_rgb = Image.new('RGB', (output_width, output_height), BACKGROUND_COLOR)
+        output_rgb.paste(output, (0, 0), output)
+        print("[PROCESS] Output: BG-removed person on full gray background")
 
     # Check if legs were cropped
     scaled_person_bottom = p_bottom * scale + y_offset
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v15.1-debug',
+        'version': 'v16-hybrid',
+        'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
+        'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
         'output_size': f'{output_width}x{output_height}',
         'scale': round(scale, 4),
         'head_height_input': head_height,
@@ -326,7 +355,7 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v15.1-debug',
+        'version': 'v16-hybrid',
         'approach': 'Output size driven by face quality',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
@@ -376,11 +405,15 @@ def test_face_detect():
 @app.route('/process', methods=['POST'])
 def process():
     """
-    Process an avatar image
+    Process an avatar image (v16 - Hybrid Mode)
 
     Request JSON:
         - image_url: URL of background-removed image (PNG with transparency)
-        - original_image_url: (optional) URL of original image for face detection
+        - original_image_url: (optional) URL of original image WITH background
+                              If provided, enables HYBRID MODE:
+                              - Uses bg-removed for accurate head bounds
+                              - Outputs original photo with its background intact
+                              - Gray padding only at canvas edges
         - face_data: (optional) Face detection result {'y', 'height'}
         - output_format: 'base64' or 'url' (default: 'base64')
 
@@ -398,45 +431,68 @@ def process():
 
         image_url = data['image_url']
         original_image_url = data.get('original_image_url')
+        original_image_base64 = data.get('original_image_base64')  # Alternative to URL
         face_data = data.get('face_data')
         output_format = data.get('output_format', 'base64')
 
+        # Determine if we have an original image source
+        has_original = original_image_url or original_image_base64
+
         print(f"\n{'='*60}")
-        print(f"Processing avatar image")
-        print(f"Image URL: {image_url[:100]}...")
+        print(f"Processing avatar image (v16)")
+        print(f"BG-removed URL: {image_url[:100]}...")
         if original_image_url:
             print(f"Original URL: {original_image_url[:100]}...")
+        if original_image_base64:
+            print(f"Original base64: [{len(original_image_base64)} chars]")
+        print(f"MODE: {'HYBRID (original with background)' if has_original else 'LEGACY (bg-removed only)'}")
         print(f"{'='*60}")
 
-        # Download the bg-removed image
+        # Download the bg-removed image (always needed for bounds detection)
         response = requests.get(image_url, timeout=30)
         if response.status_code != 200:
-            return jsonify({'success': False, 'error': f'Failed to download image: {response.status_code}'}), 400
+            return jsonify({'success': False, 'error': f'Failed to download bg-removed image: {response.status_code}'}), 400
 
         # Open as RGBA
-        img = Image.open(BytesIO(response.content)).convert('RGBA')
-        print(f"Downloaded image: {img.width}x{img.height}")
+        img_bg_removed = Image.open(BytesIO(response.content)).convert('RGBA')
+        print(f"Downloaded bg-removed image: {img_bg_removed.width}x{img_bg_removed.height}")
 
-        # If original_image_url provided and no face_data, detect face from original
-        if original_image_url and not face_data:
-            print(f"Detecting face from original image...")
+        # Get original image if provided (for hybrid mode)
+        original_img = None
+        if original_image_base64:
+            # Original provided as base64
+            print(f"Loading original image from base64 for hybrid mode...")
+            try:
+                # Handle data URI format
+                if original_image_base64.startswith('data:'):
+                    original_image_base64 = original_image_base64.split(',', 1)[1]
+                img_data = base64.b64decode(original_image_base64)
+                original_img = Image.open(BytesIO(img_data)).convert('RGBA')
+                print(f"Loaded original image: {original_img.width}x{original_img.height}")
+            except Exception as e:
+                print(f"Error loading original from base64: {e}, falling back to legacy mode")
+        elif original_image_url:
+            # Original provided as URL
+            print(f"Downloading original image for hybrid mode...")
             try:
                 orig_response = requests.get(original_image_url, timeout=30)
                 if orig_response.status_code == 200:
-                    orig_img = Image.open(BytesIO(orig_response.content)).convert('RGBA')
-                    print(f"Original image: {orig_img.width}x{orig_img.height}")
-                    face_data = detect_face_from_image(orig_img)
-                    if face_data:
-                        print(f"Face detected from original: {face_data}")
-                    else:
-                        print("No face detected from original, will try bg-removed image")
+                    original_img = Image.open(BytesIO(orig_response.content)).convert('RGBA')
+                    print(f"Downloaded original image: {original_img.width}x{original_img.height}")
+                else:
+                    print(f"Failed to download original: {orig_response.status_code}, falling back to legacy mode")
             except Exception as e:
-                print(f"Error downloading original image: {e}")
+                print(f"Error downloading original image: {e}, falling back to legacy mode")
 
-        # Process the image
-        processed_img, processing_info = process_avatar_image(img, face_data)
+        # Process the image (hybrid mode if original available)
+        processed_img, processing_info = process_avatar_image(
+            img_rgba=img_bg_removed,
+            face_data=face_data,
+            original_img=original_img
+        )
 
         print(f"\nProcessing complete!")
+        print(f"Mode: {processing_info['mode']}")
         print(f"Output: {processing_info['output_size']}")
         print(f"Scale: {processing_info['scale']}")
         print(f"Face detected: {processing_info['face_detected']}")
