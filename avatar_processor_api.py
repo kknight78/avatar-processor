@@ -408,14 +408,32 @@ def test_face_detect():
         MAX_DIM = 1000
         will_resize = img.width > MAX_DIM or img.height > MAX_DIM
 
+        # Debug: manually do the resize and base64 conversion to check sizes
+        debug_info = {}
+        original_size = img.size
+        if will_resize:
+            scale = MAX_DIM / max(img.width, img.height)
+            resized = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
+            debug_info['resized_size'] = f'{resized.width}x{resized.height}'
+
+            # Convert to RGB and get base64 length
+            rgb = Image.new('RGB', resized.size, (255, 255, 255))
+            rgb.paste(resized, mask=resized.split()[3] if resized.mode == 'RGBA' else None)
+
+            buffered = BytesIO()
+            rgb.save(buffered, format='PNG')
+            b64_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            debug_info['base64_length'] = len(b64_data)
+
         # Run face detection
         face_data = detect_face_from_image(img)
 
         return jsonify({
             'success': True,
-            'image_size': original_size,
+            'image_size': f'{original_size[0]}x{original_size[1]}',
             'will_resize': will_resize,
             'max_dimension': MAX_DIM,
+            'debug_info': debug_info,
             'face_data': face_data,
             'replicate_token_present': bool(REPLICATE_TOKEN),
             'replicate_token_length': len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0
