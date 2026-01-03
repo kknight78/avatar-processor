@@ -44,8 +44,8 @@ MIN_SIDE_MARGIN_RATIO = 0.05  # Minimum 5% margin on sides
 
 # Output constraints
 TARGET_ASPECT_RATIO = 9 / 16  # Portrait 9:16
-MAX_OUTPUT_HEIGHT = 3840      # Cap at 4K to avoid crazy file sizes
-MIN_OUTPUT_HEIGHT = 1280      # Minimum for reasonable quality
+FIXED_OUTPUT_HEIGHT = 3840    # Always output at 4K for consistency
+FIXED_OUTPUT_WIDTH = int(FIXED_OUTPUT_HEIGHT * TARGET_ASPECT_RATIO)  # 2160
 
 BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
@@ -150,30 +150,6 @@ def find_person_bounds(img):
     return left, top, right, bottom
 
 
-def calculate_output_dimensions(head_height_pixels):
-    """
-    Calculate output dimensions based on face quality.
-
-    The head height in the INPUT determines the output size.
-    This preserves face quality - bigger face = bigger output.
-
-    Args:
-        head_height_pixels: Height of head (top to chin) in input image pixels
-
-    Returns:
-        (output_width, output_height) tuple
-    """
-    # Head should be HEAD_HEIGHT_RATIO (14%) of output height
-    # So: output_height = head_height_pixels / HEAD_HEIGHT_RATIO
-    output_height = int(head_height_pixels / HEAD_HEIGHT_RATIO)
-
-    # Clamp to reasonable bounds
-    output_height = max(MIN_OUTPUT_HEIGHT, min(MAX_OUTPUT_HEIGHT, output_height))
-
-    # Width from 9:16 aspect ratio
-    output_width = int(output_height * TARGET_ASPECT_RATIO)
-
-    return output_width, output_height
 
 
 def process_avatar_image(img_rgba, face_data=None, original_img=None):
@@ -242,9 +218,10 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 
     print(f"Head height (top to chin): {head_height}px")
 
-    # === Output size based on face quality ===
-    output_width, output_height = calculate_output_dimensions(head_height)
-    print(f"Output dimensions (based on face quality): {output_width}x{output_height}")
+    # === FIXED output size for consistency ===
+    output_width = FIXED_OUTPUT_WIDTH
+    output_height = FIXED_OUTPUT_HEIGHT
+    print(f"Output dimensions (FIXED): {output_width}x{output_height}")
 
     # Calculate target values in pixels for this output size
     target_head_top_y = int(output_height * HEAD_TOP_RATIO)
@@ -310,7 +287,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v17-opencv',
+        'version': 'v18-fixed-output',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -336,12 +313,11 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v17-opencv',
-        'approach': 'OpenCV Haar Cascade face detection + hybrid mode',
+        'version': 'v18-fixed-output',
+        'approach': 'OpenCV face detection + FIXED output size for consistency',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
-        'max_output_height': MAX_OUTPUT_HEIGHT,
-        'min_output_height': MIN_OUTPUT_HEIGHT,
+        'fixed_output': f'{FIXED_OUTPUT_WIDTH}x{FIXED_OUTPUT_HEIGHT}',
         'face_detection': 'opencv_haar_cascade (local, reliable)'
     })
 
@@ -505,9 +481,9 @@ def process():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting Avatar Processor API v17-opencv on port {port}")
+    print(f"Starting Avatar Processor API v18-fixed-output on port {port}")
     print(f"Face detection: OpenCV Haar Cascade (local, reliable)")
     print(f"Head top ratio: {HEAD_TOP_RATIO} ({HEAD_TOP_RATIO*100}%)")
     print(f"Head height ratio: {HEAD_HEIGHT_RATIO} ({HEAD_HEIGHT_RATIO*100}%)")
-    print(f"Output height range: {MIN_OUTPUT_HEIGHT} - {MAX_OUTPUT_HEIGHT}")
+    print(f"FIXED output size: {FIXED_OUTPUT_WIDTH}x{FIXED_OUTPUT_HEIGHT}")
     app.run(host='0.0.0.0', port=port, debug=True)
