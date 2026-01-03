@@ -51,8 +51,11 @@ def detect_face_from_image(img_rgba):
     Detect face using Replicate face-detection model
     Returns face bbox dict with 'y' and 'height' for chin position
     """
+    print(f"[FACE-DETECT] Starting face detection, image size: {img_rgba.size}, mode: {img_rgba.mode}")
+    print(f"[FACE-DETECT] REPLICATE_TOKEN present: {bool(REPLICATE_TOKEN)}, length: {len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0}")
+
     if not REPLICATE_TOKEN:
-        print("No REPLICATE_TOKEN, skipping face detection")
+        print("[FACE-DETECT] No REPLICATE_TOKEN, skipping face detection")
         return None
 
     # Convert image to base64 for Replicate
@@ -64,8 +67,11 @@ def detect_face_from_image(img_rgba):
     image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
     data_uri = f"data:image/png;base64,{image_data}"
 
+    print(f"[FACE-DETECT] Base64 data length: {len(image_data)}")
+
     try:
         # Using marckohlbrugge/face-detect model
+        print("[FACE-DETECT] Sending prediction request to Replicate...")
         response = requests.post(
             "https://api.replicate.com/v1/predictions",
             headers={
@@ -79,51 +85,64 @@ def detect_face_from_image(img_rgba):
             timeout=30
         )
 
+        print(f"[FACE-DETECT] Prediction response status: {response.status_code}")
+
         prediction = response.json()
         if 'id' not in prediction:
-            print(f"Face detection failed to start: {prediction}")
+            print(f"[FACE-DETECT] Failed to start - response: {prediction}")
             return None
+
+        print(f"[FACE-DETECT] Prediction started: {prediction.get('id')}")
 
         get_url = prediction['urls']['get']
 
         # Poll for result (max 30 seconds)
-        for _ in range(30):
+        for i in range(30):
             result = requests.get(
                 get_url,
                 headers={"Authorization": f"Bearer {REPLICATE_TOKEN}"},
                 timeout=10
             ).json()
 
-            if result['status'] == 'succeeded':
+            status = result['status']
+            if i % 5 == 0:  # Log every 5 seconds
+                print(f"[FACE-DETECT] Poll {i}: status={status}")
+
+            if status == 'succeeded':
                 output = result.get('output')
-                print(f"Face detection raw output: {output}")
+                print(f"[FACE-DETECT] Success! Raw output: {output}")
 
                 if output:
                     # Handle different output formats from the model
                     if isinstance(output, dict) and 'faces' in output and len(output['faces']) > 0:
                         face = output['faces'][0]
+                        print(f"[FACE-DETECT] Found face: y={face['y']}, height={face['height']}")
                         return {'y': face['y'], 'height': face['height']}
                     elif isinstance(output, list) and len(output) > 0:
                         face = output[0]
                         if 'y' in face and 'height' in face:
+                            print(f"[FACE-DETECT] Found face (list): y={face['y']}, height={face['height']}")
                             return {'y': face['y'], 'height': face['height']}
                     elif isinstance(output, dict) and 'y' in output:
+                        print(f"[FACE-DETECT] Found face (dict): y={output['y']}, height={output['height']}")
                         return {'y': output['y'], 'height': output['height']}
 
-                print("No face found in output")
+                print(f"[FACE-DETECT] No face found in output structure: {type(output)}")
                 return None
 
-            elif result['status'] == 'failed':
-                print(f"Face detection failed: {result.get('error')}")
+            elif status == 'failed':
+                print(f"[FACE-DETECT] Prediction failed: {result.get('error')}")
                 return None
 
             time.sleep(1)
 
-        print("Face detection timed out")
+        print("[FACE-DETECT] Timed out after 30 seconds")
         return None
 
     except Exception as e:
-        print(f"Face detection error: {e}")
+        print(f"[FACE-DETECT] Exception: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
