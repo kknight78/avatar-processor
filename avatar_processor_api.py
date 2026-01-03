@@ -9,7 +9,7 @@ Flask API that processes avatar photos for HeyGen:
 5. Output size derived from face quality (not fixed resolution)
 6. Returns processed image URL (via Cloudinary or base64)
 
-v15: Ratio-based sizing - preserves face quality, output size driven by input face resolution
+v16.4-hybrid: Ratio-based sizing with hybrid mode (original background preserved)
 """
 
 import os
@@ -20,11 +20,18 @@ from io import BytesIO
 from flask import Flask, request, jsonify
 from PIL import Image
 import numpy as np
+import mediapipe as mp
 
 app = Flask(__name__)
 
-# Replicate API token for face detection
-REPLICATE_TOKEN = os.environ.get('REPLICATE_TOKEN', '')
+# Initialize MediaPipe Face Mesh for reliable face detection
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=True,
+    max_num_faces=1,
+    refine_landmarks=True,  # Includes iris landmarks for better accuracy
+    min_detection_confidence=0.5
+)
 
 # === RATIO-BASED CONSTANTS (no more fixed pixels!) ===
 # These ratios work at ANY resolution
@@ -48,116 +55,64 @@ CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', '')
 
 def detect_face_from_image(img_rgba):
     """
-    Detect face using Replicate face-detection model
-    Returns face bbox dict with 'y' and 'height' for chin position
+    Detect face using MediaPipe Face Mesh (local, fast, reliable)
+    Returns dict with 'y' (face top) and 'height' (face height to chin)
     """
-    print(f"[FACE-DETECT] Starting face detection, image size: {img_rgba.size}, mode: {img_rgba.mode}")
-    print(f"[FACE-DETECT] REPLICATE_TOKEN present: {bool(REPLICATE_TOKEN)}, length: {len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0}")
-
-    if not REPLICATE_TOKEN:
-        print("[FACE-DETECT] No REPLICATE_TOKEN, skipping face detection")
-        return None
-
-    # Store original size for scaling coordinates back
-    original_width, original_height = img_rgba.size
-    scale_factor = 1.0
-
-    # Resize large images to reduce payload size (face detection doesn't need full resolution)
-    MAX_DIMENSION = 1000
-    if original_width > MAX_DIMENSION or original_height > MAX_DIMENSION:
-        scale_factor = MAX_DIMENSION / max(original_width, original_height)
-        new_width = int(original_width * scale_factor)
-        new_height = int(original_height * scale_factor)
-        img_rgba = img_rgba.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        print(f"[FACE-DETECT] Resized for detection: {original_width}x{original_height} -> {new_width}x{new_height} (scale: {scale_factor:.3f})")
-
-    # Convert image to base64 for Replicate
-    buffered = BytesIO()
-    # Convert RGBA to RGB for face detection
-    img_rgb = Image.new('RGB', img_rgba.size, (255, 255, 255))
-    img_rgb.paste(img_rgba, mask=img_rgba.split()[3] if img_rgba.mode == 'RGBA' else None)
-    img_rgb.save(buffered, format='PNG')
-    image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
-    data_uri = f"data:image/png;base64,{image_data}"
-
-    print(f"[FACE-DETECT] Base64 data length: {len(image_data)}")
+    print(f"[FACE-DETECT] Starting MediaPipe face detection, image size: {img_rgba.size}, mode: {img_rgba.mode}")
 
     try:
-        # Using marckohlbrugge/face-detect model
-        print("[FACE-DETECT] Sending prediction request to Replicate...")
-        response = requests.post(
-            "https://api.replicate.com/v1/predictions",
-            headers={
-                "Authorization": f"Bearer {REPLICATE_TOKEN}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "version": "8932afc017cd4f63d97693ce6f82de5daff86b54b6deae5629726510ca7ce191",
-                "input": {"image": data_uri}
-            },
-            timeout=30
-        )
+        # Convert RGBA to RGB with white background for face detection
+        img_rgb = Image.new('RGB', img_rgba.size, (255, 255, 255))
+        if img_rgba.mode == 'RGBA':
+            img_rgb.paste(img_rgba, mask=img_rgba.split()[3])
+        else:
+            img_rgb.paste(img_rgba)
 
-        print(f"[FACE-DETECT] Prediction response status: {response.status_code}")
+        # Convert to numpy array for MediaPipe
+        img_array = np.array(img_rgb)
 
-        prediction = response.json()
-        if 'id' not in prediction:
-            print(f"[FACE-DETECT] Failed to start - response: {prediction}")
+        # Run face mesh detection
+        results = face_mesh.process(img_array)
+
+        if not results.multi_face_landmarks:
+            print("[FACE-DETECT] MediaPipe: No face detected")
             return None
 
-        print(f"[FACE-DETECT] Prediction started: {prediction.get('id')}")
+        # Get the first face's landmarks
+        face_landmarks = results.multi_face_landmarks[0]
 
-        get_url = prediction['urls']['get']
+        # Image dimensions for converting normalized coordinates
+        img_height, img_width = img_array.shape[:2]
 
-        # Poll for result (max 30 seconds)
-        for i in range(30):
-            result = requests.get(
-                get_url,
-                headers={"Authorization": f"Bearer {REPLICATE_TOKEN}"},
-                timeout=10
-            ).json()
+        # Key landmark indices in MediaPipe Face Mesh:
+        # 10 = forehead (top of face)
+        # 152 = chin (bottom of face)
+        # We'll also use 234 (right cheek) and 454 (left cheek) to verify face detection
 
-            status = result['status']
-            if i % 5 == 0:  # Log every 5 seconds
-                print(f"[FACE-DETECT] Poll {i}: status={status}")
+        # Get forehead (top of face) - landmark 10
+        forehead = face_landmarks.landmark[10]
+        forehead_y = int(forehead.y * img_height)
 
-            if status == 'succeeded':
-                output = result.get('output')
-                print(f"[FACE-DETECT] Success! Raw output: {output}")
+        # Get chin (bottom of face) - landmark 152
+        chin = face_landmarks.landmark[152]
+        chin_y = int(chin.y * img_height)
 
-                if output:
-                    # Handle different output formats from the model
-                    face = None
-                    if isinstance(output, dict) and 'faces' in output and len(output['faces']) > 0:
-                        face = output['faces'][0]
-                    elif isinstance(output, list) and len(output) > 0:
-                        face = output[0]
-                    elif isinstance(output, dict) and 'y' in output:
-                        face = output
+        # Calculate face bounding box
+        face_top = forehead_y
+        face_height = chin_y - forehead_y
 
-                    if face and 'y' in face and 'height' in face:
-                        # Scale coordinates back to original image size
-                        scaled_y = int(face['y'] / scale_factor)
-                        scaled_height = int(face['height'] / scale_factor)
-                        print(f"[FACE-DETECT] Found face: y={face['y']}, height={face['height']}")
-                        if scale_factor != 1.0:
-                            print(f"[FACE-DETECT] Scaled to original: y={scaled_y}, height={scaled_height}")
-                        return {'y': scaled_y, 'height': scaled_height}
+        # Sanity check
+        if face_height <= 0:
+            print(f"[FACE-DETECT] Invalid face height: {face_height}")
+            return None
 
-                print(f"[FACE-DETECT] No face found in output structure: {type(output)}")
-                return None
+        print(f"[FACE-DETECT] MediaPipe found face: forehead_y={forehead_y}, chin_y={chin_y}")
+        print(f"[FACE-DETECT] Face top: {face_top}, height: {face_height}")
 
-            elif status == 'failed':
-                print(f"[FACE-DETECT] Prediction failed: {result.get('error')}")
-                return None
-
-            time.sleep(1)
-
-        print("[FACE-DETECT] Timed out after 30 seconds")
-        return None
+        return {'y': face_top, 'height': face_height}
 
     except Exception as e:
-        print(f"[FACE-DETECT] Exception: {type(e).__name__}: {e}")
+        print(f"[FACE-DETECT] MediaPipe exception: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -346,7 +301,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v16.3-hybrid',
+        'version': 'v17-mediapipe',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -372,14 +327,13 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v16.3-hybrid',
-        'approach': 'Output size driven by face quality',
+        'version': 'v17-mediapipe',
+        'approach': 'MediaPipe face detection + hybrid mode',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
         'max_output_height': MAX_OUTPUT_HEIGHT,
         'min_output_height': MIN_OUTPUT_HEIGHT,
-        'face_detection': 'enabled' if REPLICATE_TOKEN else 'disabled',
-        'replicate_token_length': len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0
+        'face_detection': 'mediapipe (local, reliable)'
     })
 
 
@@ -402,41 +356,15 @@ def test_face_detect():
             return jsonify({'error': f'Failed to download: {response.status_code}'}), 400
 
         img = Image.open(BytesIO(response.content)).convert('RGBA')
-        original_size = f'{img.width}x{img.height}'
 
-        # Check if resize will happen
-        MAX_DIM = 1000
-        will_resize = img.width > MAX_DIM or img.height > MAX_DIM
-
-        # Debug: manually do the resize and base64 conversion to check sizes
-        debug_info = {}
-        original_size = img.size
-        if will_resize:
-            scale = MAX_DIM / max(img.width, img.height)
-            resized = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
-            debug_info['resized_size'] = f'{resized.width}x{resized.height}'
-
-            # Convert to RGB and get base64 length
-            rgb = Image.new('RGB', resized.size, (255, 255, 255))
-            rgb.paste(resized, mask=resized.split()[3] if resized.mode == 'RGBA' else None)
-
-            buffered = BytesIO()
-            rgb.save(buffered, format='PNG')
-            b64_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            debug_info['base64_length'] = len(b64_data)
-
-        # Run face detection
+        # Run MediaPipe face detection
         face_data = detect_face_from_image(img)
 
         return jsonify({
             'success': True,
-            'image_size': f'{original_size[0]}x{original_size[1]}',
-            'will_resize': will_resize,
-            'max_dimension': MAX_DIM,
-            'debug_info': debug_info,
+            'image_size': f'{img.width}x{img.height}',
             'face_data': face_data,
-            'replicate_token_present': bool(REPLICATE_TOKEN),
-            'replicate_token_length': len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0
+            'detection_method': 'mediapipe'
         })
 
     except Exception as e:
@@ -568,7 +496,8 @@ def process():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting Avatar Processor API v15 (ratio-based) on port {port}")
+    print(f"Starting Avatar Processor API v17-mediapipe on port {port}")
+    print(f"Face detection: MediaPipe (local, reliable)")
     print(f"Head top ratio: {HEAD_TOP_RATIO} ({HEAD_TOP_RATIO*100}%)")
     print(f"Head height ratio: {HEAD_HEIGHT_RATIO} ({HEAD_HEIGHT_RATIO*100}%)")
     print(f"Output height range: {MIN_OUTPUT_HEIGHT} - {MAX_OUTPUT_HEIGHT}")
