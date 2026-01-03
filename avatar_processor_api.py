@@ -103,13 +103,19 @@ def detect_face_from_image(img_rgba):
         largest_face = max(faces, key=lambda f: f[2] * f[3])
         x, y, w, h = largest_face
 
-        # Haar Cascade detects the face box, but we need forehead to chin
-        # The detection box is usually from forehead to jaw
+        # Haar Cascade detects face box from ~eyebrows to ~jaw line
+        # But we need forehead to CHIN for accurate head height
+        # The chin is typically ~15-20% below the jaw line detected by Haar
+        # Extend the face height to include the chin
+        CHIN_EXTENSION = 0.18  # Add 18% to include chin below jaw
+        extended_h = int(h * (1 + CHIN_EXTENSION))
+
         # Convert numpy int32 to Python int for JSON serialization
         face_top = int(y)
-        face_height = int(h)
+        face_height = extended_h
 
         print(f"[FACE-DETECT] OpenCV found face at: x={x}, y={y}, w={w}, h={h}")
+        print(f"[FACE-DETECT] Extended for chin: {h} -> {extended_h} (+{CHIN_EXTENSION*100}%)")
         print(f"[FACE-DETECT] Using face_top={face_top}, face_height={face_height}")
 
         return {'y': face_top, 'height': face_height}
