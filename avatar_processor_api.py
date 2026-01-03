@@ -44,8 +44,6 @@ MIN_SIDE_MARGIN_RATIO = 0.05  # Minimum 5% margin on sides
 
 # Output constraints
 TARGET_ASPECT_RATIO = 9 / 16  # Portrait 9:16
-FIXED_OUTPUT_HEIGHT = 3840    # Always output at 4K for consistency
-FIXED_OUTPUT_WIDTH = int(FIXED_OUTPUT_HEIGHT * TARGET_ASPECT_RATIO)  # 2160
 
 BACKGROUND_COLOR = (128, 128, 128)  # Neutral gray for RVM masking
 
@@ -218,76 +216,59 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 
     print(f"Head height (top to chin): {head_height}px")
 
-    # === FIXED output size for consistency ===
-    output_width = FIXED_OUTPUT_WIDTH
-    output_height = FIXED_OUTPUT_HEIGHT
-    print(f"Output dimensions (FIXED): {output_width}x{output_height}")
+    # === OUTPUT SIZE derived from head height (NO SCALING!) ===
+    # Head should be 14% of output, so output = head / 0.14
+    output_height = int(head_height / HEAD_HEIGHT_RATIO)
+    output_width = int(output_height * TARGET_ASPECT_RATIO)
+    print(f"Output dimensions (from head): {output_width}x{output_height}")
 
-    # Calculate target values in pixels for this output size
+    # Target position for head top
     target_head_top_y = int(output_height * HEAD_TOP_RATIO)
-    target_head_height = int(output_height * HEAD_HEIGHT_RATIO)
-
     print(f"Target head position: top at y={target_head_top_y} ({HEAD_TOP_RATIO*100}%)")
-    print(f"Target head height: {target_head_height}px ({HEAD_HEIGHT_RATIO*100}%)")
 
-    # Calculate scale to achieve target head height
-    scale = target_head_height / head_height
-    print(f"Scale factor: {scale:.4f}")
-
-    # Safety check: ensure minimum side margins
-    scaled_person_width = person_width * scale
-    max_allowed_width = output_width * (1 - 2 * MIN_SIDE_MARGIN_RATIO)
-    if scaled_person_width > max_allowed_width:
-        old_scale = scale
-        scale = max_allowed_width / person_width
-        print(f"Adjusted scale for side margins: {old_scale:.4f} -> {scale:.4f}")
-
-    # Resize the source image (original or bg-removed)
-    new_width = int(output_source_img.width * scale)
-    new_height = int(output_source_img.height * scale)
-    img_scaled = output_source_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-    print(f"Scaled image: {new_width}x{new_height}")
+    # NO SCALING - just position!
+    scale = 1.0
+    print(f"Scale factor: {scale:.4f} (NO SCALING - crop/position only)")
 
     # Calculate position to place HEAD TOP at target Y position
-    scaled_head_top = head_top * scale
-    y_offset = int(target_head_top_y - scaled_head_top)
+    # head_top is position in input image, we want it at target_head_top_y in output
+    y_offset = int(target_head_top_y - head_top)
 
-    # Center horizontally based on person center (from transparency bounds)
-    scaled_p_left = p_left * scale
-    scaled_p_right = p_right * scale
-    scaled_person_center_x = (scaled_p_left + scaled_p_right) / 2
-    x_offset = int(output_width / 2 - scaled_person_center_x)
+    # Center horizontally based on person center
+    person_center_x = (p_left + p_right) / 2
+    x_offset = int(output_width / 2 - person_center_x)
 
     print(f"Positioning: x_offset={x_offset}, y_offset={y_offset}")
 
-    # Create output canvas
+    # Create output canvas - NO SCALING, just crop/position
     if use_original:
         # HYBRID MODE: Gray background only at edges, original photo with its background
         output_rgb = Image.new('RGB', (output_width, output_height), BACKGROUND_COLOR)
         # Convert original to RGB if needed
-        if img_scaled.mode == 'RGBA':
-            img_scaled_rgb = Image.new('RGB', img_scaled.size, BACKGROUND_COLOR)
-            img_scaled_rgb.paste(img_scaled, (0, 0), img_scaled)
-            img_scaled = img_scaled_rgb
-        elif img_scaled.mode != 'RGB':
-            img_scaled = img_scaled.convert('RGB')
-        # Paste original photo (with its background) onto gray canvas
-        output_rgb.paste(img_scaled, (x_offset, y_offset))
-        print("[PROCESS] Output: Original photo with background, gray padding at edges")
+        img_to_paste = output_source_img
+        if img_to_paste.mode == 'RGBA':
+            img_rgb = Image.new('RGB', img_to_paste.size, BACKGROUND_COLOR)
+            img_rgb.paste(img_to_paste, (0, 0), img_to_paste)
+            img_to_paste = img_rgb
+        elif img_to_paste.mode != 'RGB':
+            img_to_paste = img_to_paste.convert('RGB')
+        # Paste original photo (with its background) onto gray canvas - NO SCALING
+        output_rgb.paste(img_to_paste, (x_offset, y_offset))
+        print("[PROCESS] Output: Original photo positioned (NO SCALING), gray padding at edges")
     else:
         # LEGACY MODE: Full gray background with transparent person
         output = Image.new('RGBA', (output_width, output_height), (*BACKGROUND_COLOR, 255))
-        output.paste(img_scaled, (x_offset, y_offset), img_scaled)
+        output.paste(output_source_img, (x_offset, y_offset), output_source_img)
         output_rgb = Image.new('RGB', (output_width, output_height), BACKGROUND_COLOR)
         output_rgb.paste(output, (0, 0), output)
-        print("[PROCESS] Output: BG-removed person on full gray background")
+        print("[PROCESS] Output: BG-removed person positioned (NO SCALING), gray background")
 
-    # Check if legs were cropped
-    scaled_person_bottom = p_bottom * scale + y_offset
-    legs_cropped = scaled_person_bottom > output_height
+    # Check if legs were cropped (person extends beyond canvas)
+    person_bottom_in_output = p_bottom + y_offset
+    legs_cropped = person_bottom_in_output > output_height
 
     return output_rgb, {
-        'version': 'v18-fixed-output',
+        'version': 'v19-no-scale',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -313,11 +294,10 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v18-fixed-output',
-        'approach': 'OpenCV face detection + FIXED output size for consistency',
+        'version': 'v19-no-scale',
+        'approach': 'NO SCALING - crop and position only',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
-        'fixed_output': f'{FIXED_OUTPUT_WIDTH}x{FIXED_OUTPUT_HEIGHT}',
         'face_detection': 'opencv_haar_cascade (local, reliable)'
     })
 
@@ -481,9 +461,9 @@ def process():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting Avatar Processor API v18-fixed-output on port {port}")
+    print(f"Starting Avatar Processor API v19-no-scale on port {port}")
+    print(f"Approach: NO SCALING - crop and position only")
     print(f"Face detection: OpenCV Haar Cascade (local, reliable)")
     print(f"Head top ratio: {HEAD_TOP_RATIO} ({HEAD_TOP_RATIO*100}%)")
     print(f"Head height ratio: {HEAD_HEIGHT_RATIO} ({HEAD_HEIGHT_RATIO*100}%)")
-    print(f"FIXED output size: {FIXED_OUTPUT_WIDTH}x{FIXED_OUTPUT_HEIGHT}")
     app.run(host='0.0.0.0', port=port, debug=True)
