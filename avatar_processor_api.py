@@ -58,6 +58,19 @@ def detect_face_from_image(img_rgba):
         print("[FACE-DETECT] No REPLICATE_TOKEN, skipping face detection")
         return None
 
+    # Store original size for scaling coordinates back
+    original_width, original_height = img_rgba.size
+    scale_factor = 1.0
+
+    # Resize large images to reduce payload size (face detection doesn't need full resolution)
+    MAX_DIMENSION = 1000
+    if original_width > MAX_DIMENSION or original_height > MAX_DIMENSION:
+        scale_factor = MAX_DIMENSION / max(original_width, original_height)
+        new_width = int(original_width * scale_factor)
+        new_height = int(original_height * scale_factor)
+        img_rgba = img_rgba.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        print(f"[FACE-DETECT] Resized for detection: {original_width}x{original_height} -> {new_width}x{new_height} (scale: {scale_factor:.3f})")
+
     # Convert image to base64 for Replicate
     buffered = BytesIO()
     # Convert RGBA to RGB for face detection
@@ -114,18 +127,22 @@ def detect_face_from_image(img_rgba):
 
                 if output:
                     # Handle different output formats from the model
+                    face = None
                     if isinstance(output, dict) and 'faces' in output and len(output['faces']) > 0:
                         face = output['faces'][0]
-                        print(f"[FACE-DETECT] Found face: y={face['y']}, height={face['height']}")
-                        return {'y': face['y'], 'height': face['height']}
                     elif isinstance(output, list) and len(output) > 0:
                         face = output[0]
-                        if 'y' in face and 'height' in face:
-                            print(f"[FACE-DETECT] Found face (list): y={face['y']}, height={face['height']}")
-                            return {'y': face['y'], 'height': face['height']}
                     elif isinstance(output, dict) and 'y' in output:
-                        print(f"[FACE-DETECT] Found face (dict): y={output['y']}, height={output['height']}")
-                        return {'y': output['y'], 'height': output['height']}
+                        face = output
+
+                    if face and 'y' in face and 'height' in face:
+                        # Scale coordinates back to original image size
+                        scaled_y = int(face['y'] / scale_factor)
+                        scaled_height = int(face['height'] / scale_factor)
+                        print(f"[FACE-DETECT] Found face: y={face['y']}, height={face['height']}")
+                        if scale_factor != 1.0:
+                            print(f"[FACE-DETECT] Scaled to original: y={scaled_y}, height={scaled_height}")
+                        return {'y': scaled_y, 'height': scaled_height}
 
                 print(f"[FACE-DETECT] No face found in output structure: {type(output)}")
                 return None
@@ -329,7 +346,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v16.1-hybrid',
+        'version': 'v16.2-hybrid',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -355,7 +372,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v16.1-hybrid',
+        'version': 'v16.2-hybrid',
         'approach': 'Output size driven by face quality',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
