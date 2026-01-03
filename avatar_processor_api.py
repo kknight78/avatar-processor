@@ -20,18 +20,20 @@ from io import BytesIO
 from flask import Flask, request, jsonify
 from PIL import Image
 import numpy as np
-import mediapipe as mp
+import cv2
 
 app = Flask(__name__)
 
-# Initialize MediaPipe Face Mesh for reliable face detection
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=True,
-    max_num_faces=1,
-    refine_landmarks=True,  # Includes iris landmarks for better accuracy
-    min_detection_confidence=0.5
-)
+# OpenCV DNN Face Detector - downloads model on first use
+FACE_DETECTOR = None
+def get_face_detector():
+    global FACE_DETECTOR
+    if FACE_DETECTOR is None:
+        # Use OpenCV's built-in Haar Cascade (reliable, no download needed)
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        FACE_DETECTOR = cv2.CascadeClassifier(cascade_path)
+        print(f"[FACE-DETECT] Loaded Haar Cascade from: {cascade_path}")
+    return FACE_DETECTOR
 
 # === RATIO-BASED CONSTANTS (no more fixed pixels!) ===
 # These ratios work at ANY resolution
@@ -55,10 +57,10 @@ CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', '')
 
 def detect_face_from_image(img_rgba):
     """
-    Detect face using MediaPipe Face Mesh (local, fast, reliable)
+    Detect face using OpenCV Haar Cascade (local, fast, reliable)
     Returns dict with 'y' (face top) and 'height' (face height to chin)
     """
-    print(f"[FACE-DETECT] Starting MediaPipe face detection, image size: {img_rgba.size}, mode: {img_rgba.mode}")
+    print(f"[FACE-DETECT] Starting OpenCV face detection, image size: {img_rgba.size}, mode: {img_rgba.mode}")
 
     try:
         # Convert RGBA to RGB with white background for face detection
@@ -68,51 +70,52 @@ def detect_face_from_image(img_rgba):
         else:
             img_rgb.paste(img_rgba)
 
-        # Convert to numpy array for MediaPipe
+        # Convert to numpy array and then to grayscale for OpenCV
         img_array = np.array(img_rgb)
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
 
-        # Run face mesh detection
-        results = face_mesh.process(img_array)
+        # Get face detector
+        face_cascade = get_face_detector()
 
-        if not results.multi_face_landmarks:
-            print("[FACE-DETECT] MediaPipe: No face detected")
+        # Detect faces - try multiple scale factors for reliability
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(50, 50)
+        )
+
+        if len(faces) == 0:
+            # Try with more lenient parameters
+            print("[FACE-DETECT] No face with default params, trying lenient...")
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.05,
+                minNeighbors=3,
+                minSize=(30, 30)
+            )
+
+        if len(faces) == 0:
+            print("[FACE-DETECT] OpenCV: No face detected")
             return None
 
-        # Get the first face's landmarks
-        face_landmarks = results.multi_face_landmarks[0]
+        # Get the largest face (most likely the main subject)
+        largest_face = max(faces, key=lambda f: f[2] * f[3])
+        x, y, w, h = largest_face
 
-        # Image dimensions for converting normalized coordinates
-        img_height, img_width = img_array.shape[:2]
+        # Haar Cascade detects the face box, but we need forehead to chin
+        # The detection box is usually from forehead to jaw
+        # We'll use the detected y and height directly
+        face_top = y
+        face_height = h
 
-        # Key landmark indices in MediaPipe Face Mesh:
-        # 10 = forehead (top of face)
-        # 152 = chin (bottom of face)
-        # We'll also use 234 (right cheek) and 454 (left cheek) to verify face detection
-
-        # Get forehead (top of face) - landmark 10
-        forehead = face_landmarks.landmark[10]
-        forehead_y = int(forehead.y * img_height)
-
-        # Get chin (bottom of face) - landmark 152
-        chin = face_landmarks.landmark[152]
-        chin_y = int(chin.y * img_height)
-
-        # Calculate face bounding box
-        face_top = forehead_y
-        face_height = chin_y - forehead_y
-
-        # Sanity check
-        if face_height <= 0:
-            print(f"[FACE-DETECT] Invalid face height: {face_height}")
-            return None
-
-        print(f"[FACE-DETECT] MediaPipe found face: forehead_y={forehead_y}, chin_y={chin_y}")
-        print(f"[FACE-DETECT] Face top: {face_top}, height: {face_height}")
+        print(f"[FACE-DETECT] OpenCV found face at: x={x}, y={y}, w={w}, h={h}")
+        print(f"[FACE-DETECT] Using face_top={face_top}, face_height={face_height}")
 
         return {'y': face_top, 'height': face_height}
 
     except Exception as e:
-        print(f"[FACE-DETECT] MediaPipe exception: {type(e).__name__}: {e}")
+        print(f"[FACE-DETECT] OpenCV exception: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -301,7 +304,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v17-mediapipe',
+        'version': 'v17-opencv',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -327,13 +330,13 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v17-mediapipe',
-        'approach': 'MediaPipe face detection + hybrid mode',
+        'version': 'v17-opencv',
+        'approach': 'OpenCV Haar Cascade face detection + hybrid mode',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
         'max_output_height': MAX_OUTPUT_HEIGHT,
         'min_output_height': MIN_OUTPUT_HEIGHT,
-        'face_detection': 'mediapipe (local, reliable)'
+        'face_detection': 'opencv_haar_cascade (local, reliable)'
     })
 
 
@@ -496,8 +499,8 @@ def process():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting Avatar Processor API v17-mediapipe on port {port}")
-    print(f"Face detection: MediaPipe (local, reliable)")
+    print(f"Starting Avatar Processor API v17-opencv on port {port}")
+    print(f"Face detection: OpenCV Haar Cascade (local, reliable)")
     print(f"Head top ratio: {HEAD_TOP_RATIO} ({HEAD_TOP_RATIO*100}%)")
     print(f"Head height ratio: {HEAD_HEIGHT_RATIO} ({HEAD_HEIGHT_RATIO*100}%)")
     print(f"Output height range: {MIN_OUTPUT_HEIGHT} - {MAX_OUTPUT_HEIGHT}")
