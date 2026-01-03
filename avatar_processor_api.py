@@ -302,7 +302,7 @@ def process_avatar_image(img_rgba, face_data=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v15-ratio-based',
+        'version': 'v15.1-debug',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'output_size': f'{output_width}x{output_height}',
         'scale': round(scale, 4),
@@ -326,14 +326,51 @@ def process_avatar_image(img_rgba, face_data=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v15-ratio-based',
+        'version': 'v15.1-debug',
         'approach': 'Output size driven by face quality',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
         'max_output_height': MAX_OUTPUT_HEIGHT,
         'min_output_height': MIN_OUTPUT_HEIGHT,
-        'face_detection': 'enabled' if REPLICATE_TOKEN else 'disabled'
+        'face_detection': 'enabled' if REPLICATE_TOKEN else 'disabled',
+        'replicate_token_length': len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0
     })
+
+
+@app.route('/test-face-detect', methods=['POST'])
+def test_face_detect():
+    """
+    Test face detection on an image URL
+    Request JSON: {"image_url": "..."}
+    """
+    try:
+        data = request.get_json()
+        if not data or 'image_url' not in data:
+            return jsonify({'error': 'Missing image_url'}), 400
+
+        image_url = data['image_url']
+
+        # Download image
+        response = requests.get(image_url, timeout=30)
+        if response.status_code != 200:
+            return jsonify({'error': f'Failed to download: {response.status_code}'}), 400
+
+        img = Image.open(BytesIO(response.content)).convert('RGBA')
+
+        # Run face detection
+        face_data = detect_face_from_image(img)
+
+        return jsonify({
+            'success': True,
+            'image_size': f'{img.width}x{img.height}',
+            'face_data': face_data,
+            'replicate_token_present': bool(REPLICATE_TOKEN),
+            'replicate_token_length': len(REPLICATE_TOKEN) if REPLICATE_TOKEN else 0
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
 @app.route('/process', methods=['POST'])
