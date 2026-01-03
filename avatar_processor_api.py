@@ -230,9 +230,9 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     # If no face_data provided, detect face automatically
     if not face_data or 'y' not in face_data:
         print("No face_data provided, running face detection...")
-        # Detect from original if available (better quality), else from bg-removed
-        detect_source = original_img if use_original else img_rgba
-        face_data = detect_face_from_image(detect_source)
+        # Always detect from bg-removed image (cleaner background = better detection)
+        # even in hybrid mode
+        face_data = detect_face_from_image(img_rgba)
 
     # Calculate head position from face detection
     face_detected = False
@@ -329,7 +329,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
     legs_cropped = scaled_person_bottom > output_height
 
     return output_rgb, {
-        'version': 'v16-hybrid',
+        'version': 'v16.1-hybrid',
         'mode': 'hybrid_original' if use_original else 'bg_removed_only',
         'input_size': f'{img_rgba.width}x{img_rgba.height}',
         'original_size': f'{original_img.width}x{original_img.height}' if use_original else None,
@@ -355,7 +355,7 @@ def process_avatar_image(img_rgba, face_data=None, original_img=None):
 def health():
     return jsonify({
         'status': 'ok',
-        'version': 'v16-hybrid',
+        'version': 'v16.1-hybrid',
         'approach': 'Output size driven by face quality',
         'head_top_ratio': HEAD_TOP_RATIO,
         'head_height_ratio': HEAD_HEIGHT_RATIO,
