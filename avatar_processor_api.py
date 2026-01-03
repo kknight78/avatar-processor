@@ -105,9 +105,9 @@ def detect_face_from_image(img_rgba):
 
         # Haar Cascade detects the face box, but we need forehead to chin
         # The detection box is usually from forehead to jaw
-        # We'll use the detected y and height directly
-        face_top = y
-        face_height = h
+        # Convert numpy int32 to Python int for JSON serialization
+        face_top = int(y)
+        face_height = int(h)
 
         print(f"[FACE-DETECT] OpenCV found face at: x={x}, y={y}, w={w}, h={h}")
         print(f"[FACE-DETECT] Using face_top={face_top}, face_height={face_height}")
